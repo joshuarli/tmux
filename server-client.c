@@ -2693,6 +2693,34 @@ server_client_handle_key(struct client *c, struct key_event *event)
 	}
 
 	/*
+	 * Fast path: wheel events in copy/view mode bypass the command
+	 * queue entirely, going directly to the scroll accumulator.
+	 * This eliminates cmdq item allocation, server_client_check_mouse,
+	 * cmd_find_from_mouse, and key binding dispatch overhead.
+	 */
+	if (event->key == KEYC_MOUSE && MOUSE_WHEEL(event->m.b) &&
+	    options_get_number(s->options, "mouse")) {
+		struct window_pane	*wp;
+		struct window_mode_entry *wme;
+
+		wp = window_get_active_at(s->curw->window, event->m.x,
+		    event->m.y);
+		if (wp != NULL) {
+			wme = TAILQ_FIRST(&wp->modes);
+			if (wme != NULL &&
+			    (wme->mode == &window_copy_mode ||
+			    wme->mode == &window_view_mode)) {
+				if (MOUSE_BUTTONS(event->m.b) ==
+				    MOUSE_WHEEL_UP)
+					window_copy_scroll_accumulate(wp, 5);
+				else
+					window_copy_scroll_accumulate(wp, -5);
+				return (0);
+			}
+		}
+	}
+
+	/*
 	 * Add the key to the queue so it happens after any commands queued by
 	 * previous keys.
 	 */

@@ -346,6 +346,29 @@ window_copy_scroll_timer(__unused int fd, __unused short events, void *arg)
 	}
 }
 
+/*
+ * Public entry point for the fast path in server_client_handle_key:
+ * accumulate scroll delta directly, bypassing command infrastructure.
+ */
+void
+window_copy_scroll_accumulate(struct window_pane *wp, int amount)
+{
+	struct window_mode_entry	*wme;
+	struct window_copy_mode_data	*data;
+	struct timeval			 tv = {
+		.tv_usec = WINDOW_COPY_SCROLL_TIMER_USEC
+	};
+
+	wme = TAILQ_FIRST(&wp->modes);
+	if (wme == NULL || wme->data == NULL)
+		return;
+	data = wme->data;
+
+	data->scroll_deferred += amount;
+	if (!evtimer_pending(&data->scrolltimer, NULL))
+		evtimer_add(&data->scrolltimer, &tv);
+}
+
 static void
 window_copy_scroll_flush(int fd, __unused short events, void *arg)
 {
