@@ -13,12 +13,15 @@ aclocal.m4
 autom4te.cache/
 cmd-parse.c
 compat/.dirstamp
+build/
+build.ninja
+config.h
 config.log
 config.status
-configure
 core
 etc/
 fuzz/*-fuzzer
 tags
 tmux
 tmux.1.*
+.ninja*
