@@ -710,9 +710,12 @@ window_copy_pageup(struct window_pane *wp, int half_page)
 static void
 window_copy_pageup1(struct window_mode_entry *wme, int half_page)
 {
+	struct window_pane		*wp = wme->wp;
 	struct window_copy_mode_data	*data = wme->data;
 	struct screen			*s = &data->screen;
+	struct screen_write_ctx		 ctx;
 	u_int				 n, ox, oy, px, py;
+	int				 pure_scroll;
 
 	oy = screen_hsize(data->backing) + data->cy - data->oy;
 	ox = window_copy_find_length(wme, oy);
@@ -737,9 +740,13 @@ window_copy_pageup1(struct window_mode_entry *wme, int half_page)
 			data->cy = 0;
 		else
 			data->cy -= n;
-	} else
+		pure_scroll = 0;
+	} else {
 		data->oy += n;
+		pure_scroll = 1;
+	}
 
+	oy = data->cy;
 	if (data->screen.sel == NULL || !data->rectflag) {
 		py = screen_hsize(data->backing) + data->cy - data->oy;
 		px = window_copy_find_length(wme, py);
@@ -747,11 +754,27 @@ window_copy_pageup1(struct window_mode_entry *wme, int half_page)
 		    data->cx > px)
 			window_copy_cursor_end_of_line(wme);
 	}
+	if (data->cy != oy)
+		pure_scroll = 0;
 
 	if (data->searchmark != NULL && !data->timeout)
 		window_copy_search_marks(wme, NULL, data->searchregex, 1);
 	window_copy_update_selection(wme, 1, 0);
-	window_copy_redraw_screen(wme);
+
+	if (pure_scroll && n > 0 && n < screen_size_y(s)) {
+		screen_write_start_pane(&ctx, wp, NULL);
+		screen_write_cursormove(&ctx, 0, 0, 0);
+		screen_write_insertline(&ctx, n, 8);
+		window_copy_write_lines(wme, &ctx, 0, n);
+		if (s->sel != NULL && screen_size_y(s) > n)
+			window_copy_write_line(wme, &ctx, n);
+		if (data->cy >= n)
+			window_copy_write_line(wme, &ctx, data->cy);
+		screen_write_cursormove(&ctx, data->cx, data->cy, 0);
+		screen_write_stop(&ctx);
+		wp->flags |= PANE_REDRAWSCROLLBAR;
+	} else
+		window_copy_redraw_screen(wme);
 }
 
 void
@@ -768,9 +791,12 @@ static int
 window_copy_pagedown1(struct window_mode_entry *wme, int half_page,
     int scroll_exit)
 {
+	struct window_pane		*wp = wme->wp;
 	struct window_copy_mode_data	*data = wme->data;
 	struct screen			*s = &data->screen;
+	struct screen_write_ctx		 ctx;
 	u_int				 n, ox, oy, px, py;
+	int				 pure_scroll;
 
 	oy = screen_hsize(data->backing) + data->cy - data->oy;
 	ox = window_copy_find_length(wme, oy);
@@ -795,9 +821,13 @@ window_copy_pagedown1(struct window_mode_entry *wme, int half_page,
 			data->cy = screen_size_y(data->backing) - 1;
 		else
 			data->cy += n - data->oy;
-	} else
+		pure_scroll = 0;
+	} else {
 		data->oy -= n;
+		pure_scroll = 1;
+	}
 
+	oy = data->cy;
 	if (data->screen.sel == NULL || !data->rectflag) {
 		py = screen_hsize(data->backing) + data->cy - data->oy;
 		px = window_copy_find_length(wme, py);
@@ -805,13 +835,32 @@ window_copy_pagedown1(struct window_mode_entry *wme, int half_page,
 		    data->cx > px)
 			window_copy_cursor_end_of_line(wme);
 	}
+	if (data->cy != oy)
+		pure_scroll = 0;
 
 	if (scroll_exit && data->oy == 0)
 		return (1);
 	if (data->searchmark != NULL && !data->timeout)
 		window_copy_search_marks(wme, NULL, data->searchregex, 1);
 	window_copy_update_selection(wme, 1, 0);
-	window_copy_redraw_screen(wme);
+
+	if (pure_scroll && n > 0 && n < screen_size_y(s)) {
+		screen_write_start_pane(&ctx, wp, NULL);
+		screen_write_cursormove(&ctx, 0, 0, 0);
+		screen_write_deleteline(&ctx, n, 8);
+		window_copy_write_lines(wme, &ctx,
+		    screen_size_y(s) - n, n);
+		window_copy_write_line(wme, &ctx, 0);
+		if (s->sel != NULL && screen_size_y(s) > n)
+			window_copy_write_line(wme, &ctx,
+			    screen_size_y(s) - n - 1);
+		if (data->cy < screen_size_y(s) - n)
+			window_copy_write_line(wme, &ctx, data->cy);
+		screen_write_cursormove(&ctx, data->cx, data->cy, 0);
+		screen_write_stop(&ctx);
+		wp->flags |= PANE_REDRAWSCROLLBAR;
+	} else
+		window_copy_redraw_screen(wme);
 	return (0);
 }
 
