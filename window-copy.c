@@ -4702,10 +4702,55 @@ static void
 window_copy_write_lines(struct window_mode_entry *wme,
     struct screen_write_ctx *ctx, u_int py, u_int ny)
 {
-	u_int	yy;
+	struct window_pane		*wp = wme->wp;
+	struct window_copy_mode_data	*data = wme->data;
+	struct screen			*s = &data->screen;
+	struct options			*oo = wp->window->options;
+	struct grid_cell		 gc, mgc, cgc, mkgc;
+	struct format_tree		*ft;
+	u_int				 sx = screen_size_x(s);
+	u_int				 hsize = screen_hsize(data->backing);
+	u_int				 yy;
+	const char			*value;
+	char				*expanded;
 
-	for (yy = py; yy < py + ny; yy++)
-		window_copy_write_line(wme, ctx, yy);
+	ft = format_create_defaults(NULL, NULL, NULL, NULL, wp);
+
+	style_apply(&gc, oo, "copy-mode-position-style", ft);
+	gc.flags |= GRID_FLAG_NOPALETTE;
+	style_apply(&mgc, oo, "copy-mode-match-style", ft);
+	mgc.flags |= GRID_FLAG_NOPALETTE;
+	style_apply(&cgc, oo, "copy-mode-current-match-style", ft);
+	cgc.flags |= GRID_FLAG_NOPALETTE;
+	style_apply(&mkgc, oo, "copy-mode-mark-style", ft);
+	mkgc.flags |= GRID_FLAG_NOPALETTE;
+
+	for (yy = py; yy < py + ny; yy++) {
+		window_copy_write_one(wme, ctx, yy, hsize - data->oy + yy,
+		    sx, &mgc, &cgc, &mkgc);
+
+		if (yy == 0 && s->rupper < s->rlower &&
+		    !data->hide_position) {
+			value = options_get_string(oo,
+			    "copy-mode-position-format");
+			if (*value != '\0') {
+				expanded = format_expand(ft, value);
+				if (*expanded != '\0') {
+					screen_write_cursormove(ctx, 0, 0, 0);
+					format_draw(ctx, &gc, sx, expanded,
+					    NULL, 0);
+				}
+				free(expanded);
+			}
+		}
+
+		if (yy == data->cy && data->cx == sx) {
+			screen_write_cursormove(ctx, sx - 1, yy, 0);
+			screen_write_putc(ctx, &grid_default_cell, '$');
+		}
+	}
+
+	format_free(ft);
 }
 
 static void
