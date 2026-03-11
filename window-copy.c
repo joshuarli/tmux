@@ -199,6 +199,7 @@ enum window_copy_cmd_action {
 	WINDOW_COPY_CMD_NOTHING,
 	WINDOW_COPY_CMD_REDRAW,
 	WINDOW_COPY_CMD_CANCEL,
+	WINDOW_COPY_CMD_SCROLL_DEFERRED,
 };
 
 enum window_copy_cmd_clear {
@@ -312,6 +313,11 @@ struct window_copy_mode_data {
 	int			 jumptype;
 	struct utf8_data	*jumpchar;
 
+	int			 scroll_deferred; /* accumulated scroll delta */
+
+	struct event	 scrolltimer;
+#define WINDOW_COPY_SCROLL_TIMER_USEC 16000 /* ~60fps max */
+
 	struct event	 dragtimer;
 #define WINDOW_COPY_DRAG_REPEAT_TIME 50000
 };
@@ -338,6 +344,130 @@ window_copy_scroll_timer(__unused int fd, __unused short events, void *arg)
 		evtimer_add(&data->dragtimer, &tv);
 		window_copy_cursor_down(wme, 1);
 	}
+}
+
+static void
+window_copy_scroll_flush(int fd, __unused short events, void *arg)
+{
+	struct window_mode_entry	*wme = arg;
+	struct window_pane		*wp = wme->wp;
+	struct window_copy_mode_data	*data = wme->data;
+	struct screen			*s = &data->screen;
+	struct grid			*gd = data->backing->grid;
+	struct screen_write_ctx		 ctx;
+	struct grid_cell		 gc;
+	struct client			*c;
+	struct timeval			 tv;
+	u_int				 sy, sx, ny, yy, fx, fy, hsize;
+	int				 delta, mode;
+
+	if (TAILQ_FIRST(&wp->modes) != wme)
+		return;
+
+	if (data->scroll_deferred == 0)
+		return;
+
+	/*
+	 * If called from timer (fd != -1) and any client's output buffer
+	 * is backed up, defer until it drains.  Direct calls (fd == -1)
+	 * from scroll_down_and_cancel or pre-command flush must execute
+	 * immediately.
+	 */
+	if (fd != -1) {
+		TAILQ_FOREACH(c, &clients, entry) {
+			if (c->session == NULL || c->fd == -1)
+				continue;
+			if (c->tty.flags & TTY_BLOCK ||
+			    EVBUFFER_LENGTH(c->tty.out) > 0) {
+				tv.tv_sec = 0;
+				tv.tv_usec = 1000;
+				evtimer_add(&data->scrolltimer, &tv);
+				return;
+			}
+		}
+	}
+
+	delta = data->scroll_deferred;
+	data->scroll_deferred = 0;
+
+	sy = screen_size_y(s);
+	sx = screen_size_x(s);
+
+	if (s->sel == NULL || !data->rectflag)
+		data->cx = data->lastcx;
+
+	/* Hide cursor during scroll to avoid flicker. */
+	mode = s->mode;
+	s->mode &= ~MODE_CURSOR;
+
+	/*
+	 * Fast scroll path: update oy, use insertline/deleteline, then
+	 * copy raw cells from the backing grid.  No search marks, no
+	 * selection updates, no format trees, no position indicator.
+	 */
+	if (delta > 0) {
+		/* Scroll into history (increase oy). */
+		ny = (u_int)delta;
+		if (ny > screen_hsize(data->backing))
+			ny = screen_hsize(data->backing);
+		if (data->oy > screen_hsize(data->backing) - ny)
+			ny = screen_hsize(data->backing) - data->oy;
+		if (ny == 0)
+			goto out;
+		data->oy += ny;
+		if (ny > sy)
+			ny = sy;
+
+		hsize = screen_hsize(data->backing);
+		screen_write_start_pane(&ctx, wp, NULL);
+		screen_write_cursormove(&ctx, 0, 0, 0);
+		screen_write_insertline(&ctx, ny, 8);
+		for (yy = 0; yy < ny; yy++) {
+			fy = hsize - data->oy + yy;
+			screen_write_cursormove(&ctx, 0, yy, 0);
+			for (fx = 0; fx < sx; fx++) {
+				grid_get_cell(gd, fx, fy, &gc);
+				if (fx + gc.data.width <= sx)
+					screen_write_cell(&ctx, &gc);
+			}
+		}
+		screen_write_stop(&ctx);
+	} else {
+		/* Scroll toward live (decrease oy). */
+		ny = (u_int)-delta;
+		if (data->oy < ny)
+			ny = data->oy;
+		if (ny == 0)
+			goto out;
+		data->oy -= ny;
+		if (ny > sy)
+			ny = sy;
+
+		hsize = screen_hsize(data->backing);
+		screen_write_start_pane(&ctx, wp, NULL);
+		screen_write_cursormove(&ctx, 0, 0, 0);
+		screen_write_deleteline(&ctx, ny, 8);
+		for (yy = 0; yy < ny; yy++) {
+			fy = hsize - data->oy + (sy - ny + yy);
+			screen_write_cursormove(&ctx, 0, sy - ny + yy, 0);
+			for (fx = 0; fx < sx; fx++) {
+				grid_get_cell(gd, fx, fy, &gc);
+				if (fx + gc.data.width <= sx)
+					screen_write_cell(&ctx, &gc);
+			}
+		}
+		screen_write_stop(&ctx);
+
+		if (data->scroll_exit && data->oy == 0) {
+			s->mode = mode;
+			window_pane_reset_mode(wp);
+			return;
+		}
+	}
+
+out:
+	s->mode = mode;
+	wp->flags |= PANE_REDRAWSCROLLBAR;
 }
 
 static struct screen *
@@ -433,6 +563,7 @@ window_copy_common_init(struct window_mode_entry *wme)
 	data->modekeys = options_get_number(wp->window->options, "mode-keys");
 
 	evtimer_set(&data->dragtimer, window_copy_scroll_timer, wme);
+	evtimer_set(&data->scrolltimer, window_copy_scroll_flush, wme);
 
 	return (data);
 }
@@ -508,6 +639,7 @@ window_copy_free(struct window_mode_entry *wme)
 	struct window_copy_mode_data	*data = wme->data;
 
 	evtimer_del(&data->dragtimer);
+	evtimer_del(&data->scrolltimer);
 
 	free(data->searchmark);
 	free(data->searchstr);
@@ -2212,12 +2344,15 @@ window_copy_cmd_scroll_down(struct window_copy_cmd_state *cs)
 	struct window_mode_entry	*wme = cs->wme;
 	struct window_copy_mode_data	*data = wme->data;
 	u_int				 np = wme->prefix;
+	struct timeval			 tv = {
+		.tv_usec = WINDOW_COPY_SCROLL_TIMER_USEC
+	};
 
-	for (; np != 0; np--)
-		window_copy_cursor_down(wme, 1);
-	if (data->scroll_exit && data->oy == 0)
-		return (WINDOW_COPY_CMD_CANCEL);
-	return (WINDOW_COPY_CMD_NOTHING);
+	data->scroll_deferred -= (int)np;
+	if (!evtimer_pending(&data->scrolltimer, NULL))
+		evtimer_add(&data->scrolltimer, &tv);
+
+	return (WINDOW_COPY_CMD_SCROLL_DEFERRED);
 }
 
 static enum window_copy_cmd_action
@@ -2227,8 +2362,11 @@ window_copy_cmd_scroll_down_and_cancel(struct window_copy_cmd_state *cs)
 	struct window_copy_mode_data	*data = wme->data;
 	u_int				 np = wme->prefix;
 
-	for (; np != 0; np--)
-		window_copy_cursor_down(wme, 1);
+	/* Flush immediately for cancel variant. */
+	if (evtimer_pending(&data->scrolltimer, NULL))
+		evtimer_del(&data->scrolltimer);
+	data->scroll_deferred -= (int)np;
+	window_copy_scroll_flush(-1, 0, wme);
 	if (data->oy == 0)
 		return (WINDOW_COPY_CMD_CANCEL);
 	return (WINDOW_COPY_CMD_NOTHING);
@@ -2238,11 +2376,17 @@ static enum window_copy_cmd_action
 window_copy_cmd_scroll_up(struct window_copy_cmd_state *cs)
 {
 	struct window_mode_entry	*wme = cs->wme;
+	struct window_copy_mode_data	*data = wme->data;
 	u_int				 np = wme->prefix;
+	struct timeval			 tv = {
+		.tv_usec = WINDOW_COPY_SCROLL_TIMER_USEC
+	};
 
-	for (; np != 0; np--)
-		window_copy_cursor_up(wme, 1);
-	return (WINDOW_COPY_CMD_NOTHING);
+	data->scroll_deferred += (int)np;
+	if (!evtimer_pending(&data->scrolltimer, NULL))
+		evtimer_add(&data->scrolltimer, &tv);
+
+	return (WINDOW_COPY_CMD_SCROLL_DEFERRED);
 }
 
 static enum window_copy_cmd_action
@@ -3385,6 +3529,16 @@ window_copy_command(struct window_mode_entry *wme, struct client *c,
 		return;
 	command = args_string(args, 0);
 
+	/* Flush deferred scroll before non-scroll commands. */
+	if (data->scroll_deferred != 0 &&
+	    strcmp(command, "scroll-up") != 0 &&
+	    strcmp(command, "scroll-down") != 0 &&
+	    strcmp(command, "scroll-down-and-cancel") != 0) {
+		if (evtimer_pending(&data->scrolltimer, NULL))
+			evtimer_del(&data->scrolltimer);
+		window_copy_scroll_flush(-1, 0, wme);
+	}
+
 	if (m != NULL && m->valid && !MOUSE_WHEEL(m->b))
 		window_copy_move_mouse(m);
 
@@ -3444,6 +3598,8 @@ window_copy_command(struct window_mode_entry *wme, struct client *c,
 		window_pane_reset_mode(wp);
 	else if (action == WINDOW_COPY_CMD_REDRAW)
 		window_copy_redraw_screen(wme);
+	else if (action == WINDOW_COPY_CMD_SCROLL_DEFERRED)
+		;  /* rendering deferred to timer */
 	else if (action == WINDOW_COPY_CMD_NOTHING) {
 		/*
 		 * Nothing is not actually nothing - most commands at least
