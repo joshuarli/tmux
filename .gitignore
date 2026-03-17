@@ -12,6 +12,7 @@ Makefile.in
 aclocal.m4
 autom4te.cache/
 cmd-parse.c
+cmd-parse.h
 compat/.dirstamp
 build/
 build.ninja
