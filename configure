@@ -1,5 +1,5 @@
 #!/bin/sh
-# configure - generate config.h and build.ninja for tmux on macOS.
+# configure - generate config.h and build.ninja for tmux (macOS and Linux).
 # No autotools required. Runs in under a second.
 set -e
 
@@ -30,7 +30,7 @@ Usage: ./configure [OPTIONS]
 
   --prefix=DIR            installation prefix [/usr/local]
   --sysconfdir=DIR        system config directory [/etc]
-  --enable-utf8proc       use utf8proc for Unicode (recommended on macOS)
+  --enable-utf8proc       use utf8proc for Unicode
   --disable-utf8proc      don't use utf8proc
   --enable-sixel          enable sixel image support
   --enable-debug          enable debug build flags
@@ -42,10 +42,11 @@ EOF
 	esac
 done
 
-# macOS only.
-case "$(uname -s)" in
-	Darwin) ;;
-	*) die "this configure script only supports macOS" ;;
+# Detect OS.
+OS=$(uname -s)
+case "$OS" in
+	Darwin|Linux) ;;
+	*) die "unsupported OS: $OS (Darwin and Linux are supported)" ;;
 esac
 
 TMPDIR=$(mktemp -d)
@@ -53,21 +54,37 @@ trap 'rm -rf "$TMPDIR"' EXIT
 
 # Check tools.
 command -v "$CC" >/dev/null 2>&1 || die "compiler not found: $CC"
-command -v "$PKG_CONFIG" >/dev/null 2>&1 || die "pkg-config not found (brew install pkg-config)"
-command -v ninja >/dev/null 2>&1 || die "ninja not found (brew install ninja)"
+command -v "$PKG_CONFIG" >/dev/null 2>&1 || {
+	if [ "$OS" = Darwin ]; then
+		die "pkg-config not found (brew install pkg-config)"
+	else
+		die "pkg-config not found (apt-get install pkg-config)"
+	fi
+}
+command -v ninja >/dev/null 2>&1 || {
+	if [ "$OS" = Darwin ]; then
+		die "ninja not found (brew install ninja)"
+	else
+		die "ninja not found (apt-get install ninja-build)"
+	fi
+}
 
 if ! command -v "$YACC" >/dev/null 2>&1; then
 	if command -v bison >/dev/null 2>&1; then
 		YACC="bison -y"
 	else
-		die "yacc not found (xcode-select --install)"
+		if [ "$OS" = Darwin ]; then
+			die "yacc not found (xcode-select --install)"
+		else
+			die "yacc not found (apt-get install bison)"
+		fi
 	fi
 fi
 
 # Version from configure.ac.
 VERSION=$(sed -n 's/^AC_INIT(\[tmux\], *\(.*\))/\1/p' configure.ac)
 test -n "$VERSION" || die "cannot parse version from configure.ac"
-printf 'tmux %s (macOS)\n\n' "$VERSION"
+printf 'tmux %s (%s)\n\n' "$VERSION" "$OS"
 
 # Detect libevent.
 if $PKG_CONFIG --exists "libevent_core >= 2" 2>/dev/null; then
@@ -79,7 +96,11 @@ elif $PKG_CONFIG --exists "libevent >= 2" 2>/dev/null; then
 	LIBEVENT_LIBS=$($PKG_CONFIG --libs libevent)
 	printf 'libevent: %s\n' "$($PKG_CONFIG --modversion libevent)"
 else
-	die "libevent >= 2 not found (brew install libevent)"
+	if [ "$OS" = Darwin ]; then
+		die "libevent >= 2 not found (brew install libevent)"
+	else
+		die "libevent >= 2 not found (apt-get install libevent-dev)"
+	fi
 fi
 
 # Detect utf8proc.
@@ -93,24 +114,30 @@ if [ "$ENABLE_UTF8PROC" = yes ]; then
 		HAVE_UTF8PROC=yes
 		printf 'utf8proc: %s\n' "$($PKG_CONFIG --modversion libutf8proc)"
 	else
-		die "utf8proc not found (brew install utf8proc)"
+		if [ "$OS" = Darwin ]; then
+			die "utf8proc not found (brew install utf8proc)"
+		else
+			die "utf8proc not found (apt-get install libutf8proc-dev)"
+		fi
 	fi
 else
 	printf 'utf8proc: disabled\n'
 fi
 
-# Compile test helper.
+# Compile test helper. Optional $1: extra libraries.
 try_compile() {
+	_extra="${1:-}"
 	cat > "$TMPDIR/test.c"
 	# shellcheck disable=SC2086
 	$CC $LIBEVENT_CFLAGS \
 		-o "$TMPDIR/test" "$TMPDIR/test.c" \
-		$LIBEVENT_LIBS -lresolv 2>/dev/null
+		$LIBEVENT_LIBS $_extra 2>/dev/null
 }
 
-# Test for reallocarray.
+# Test for reallocarray (missing on older glibc and older macOS).
 HAVE_REALLOCARRAY=no
-if printf '#include <stdlib.h>\nint main(void){return reallocarray(NULL,1,1)==NULL;}' | try_compile; then
+if printf '#include <stdlib.h>\nint main(void){return reallocarray(NULL,1,1)==NULL;}' \
+		| try_compile; then
 	HAVE_REALLOCARRAY=yes
 fi
 
@@ -131,36 +158,146 @@ then
 	HAVE_QUEUE_H=yes
 fi
 
+# Platform-specific detection.
+LIBS_EXTRA=""
+
+if [ "$OS" = Darwin ]; then
+	# All these are known-present on macOS; no probing needed.
+	HAVE_B64_NTOP=yes
+	HAVE_CLOSEFROM=no
+	HAVE_EXPLICIT_BZERO=no
+	HAVE_FGETLN=yes
+	HAVE_FORKPTY=yes
+	HAVE_GETPEEREID=yes
+	HAVE_GETPROGNAME=yes
+	HAVE_PROC_PIDINFO=yes
+	HAVE_STRLCAT=yes
+	HAVE_STRLCPY=yes
+	HAVE_STRTONUM=yes
+	HAVE_SYS_SIGNAME=yes
+	LIBS_EXTRA="-lresolv"
+	OSDEP="osdep-darwin.c"
+	EXTRA_COMPAT="compat/daemon-darwin.c"
+else
+	# Linux: probe what may be absent or differ from glibc to glibc.
+
+	# b64_ntop: try without -lresolv first, then with.
+	HAVE_B64_NTOP=no
+	if printf '#include <netinet/in.h>\n#include <resolv.h>\nint main(void){return b64_ntop(0,0,0,0);}' \
+			| try_compile; then
+		HAVE_B64_NTOP=yes
+	elif printf '#include <netinet/in.h>\n#include <resolv.h>\nint main(void){return b64_ntop(0,0,0,0);}' \
+			| try_compile "-lresolv"; then
+		HAVE_B64_NTOP=yes
+		LIBS_EXTRA="$LIBS_EXTRA -lresolv"
+	fi
+
+	# closefrom: glibc >= 2.34.
+	HAVE_CLOSEFROM=no
+	if printf '#include <unistd.h>\nint main(void){closefrom(3);return 0;}' \
+			| try_compile; then
+		HAVE_CLOSEFROM=yes
+	fi
+
+	# explicit_bzero: glibc >= 2.25.
+	HAVE_EXPLICIT_BZERO=no
+	if printf '#include <string.h>\nint main(void){explicit_bzero("",0);return 0;}' \
+			| try_compile; then
+		HAVE_EXPLICIT_BZERO=yes
+	fi
+
+	# strlcpy / strlcat: glibc >= 2.38.
+	HAVE_STRLCPY=no
+	if printf '#include <string.h>\nint main(void){char b[1];strlcpy(b,"",1);return 0;}' \
+			| try_compile; then
+		HAVE_STRLCPY=yes
+	fi
+	HAVE_STRLCAT=no
+	if printf '#include <string.h>\nint main(void){char b[1];strlcat(b,"",1);return 0;}' \
+			| try_compile; then
+		HAVE_STRLCAT=yes
+	fi
+
+	# forkpty: in -lutil on Linux.
+	HAVE_FORKPTY=no
+	if printf '#include <pty.h>\nint main(void){forkpty(0,0,0,0);return 0;}' \
+			| try_compile "-lutil"; then
+		HAVE_FORKPTY=yes
+		LIBS_EXTRA="$LIBS_EXTRA -lutil"
+	fi
+
+	# These BSD functions are absent on Linux.
+	HAVE_FGETLN=no
+	HAVE_GETPEEREID=no
+	HAVE_GETPROGNAME=no
+	HAVE_PROC_PIDINFO=no
+	HAVE_STRTONUM=no
+	HAVE_SYS_SIGNAME=no
+
+	OSDEP="osdep-linux.c"
+	EXTRA_COMPAT=""
+fi
+
 printf '\n'
 
 # Generate config.h.
 write_define() { printf '#define %s 1\n' "$1"; }
 {
-	printf '/* Generated by ./configure for macOS. Do not edit. */\n'
+	printf '/* Generated by ./configure. Do not edit. */\n'
 	printf '#ifndef CONFIG_H\n#define CONFIG_H\n\n'
 
-	# Headers.
-	for h in BITSTRING_H DIRENT_H ERR_H EVENT2_EVENT_H FCNTL_H \
-		 INTTYPES_H LIBPROC_H PATHS_H STDINT_H UTIL_H; do
-		write_define "HAVE_$h"
-	done
+	if [ "$OS" = Darwin ]; then
+		# Headers always present on macOS.
+		for h in BITSTRING_H DIRENT_H ERR_H EVENT2_EVENT_H FCNTL_H \
+			 INTTYPES_H LIBPROC_H PATHS_H STDINT_H UTIL_H; do
+			write_define "HAVE_$h"
+		done
+		printf '\n'
+
+		# macOS-specific workarounds.
+		write_define BROKEN___DEAD
+		write_define BROKEN_CMSG_FIRSTHDR
+		printf '\n'
+
+		# Functions always present on macOS.
+		for f in ASPRINTF CFMAKERAW CLOCK_GETTIME DAEMON DIRFD \
+			 FLOCK GETDTABLESIZE GETLINE MEMMEM SETENV \
+			 STRCASESTR STRNDUP STRNLEN STRSEP SYSCONF __PROGNAME; do
+			write_define "HAVE_$f"
+		done
+	else
+		# Headers always present on Linux.
+		for h in DIRENT_H ERR_H EVENT2_EVENT_H FCNTL_H \
+			 INTTYPES_H PATHS_H STDINT_H; do
+			write_define "HAVE_$h"
+		done
+		printf '\n'
+
+		# Functions always present on modern Linux (glibc + _GNU_SOURCE via -std=gnu99).
+		for f in ASPRINTF CFMAKERAW CLOCK_GETTIME DAEMON DIRFD \
+			 FLOCK GETDTABLESIZE GETLINE MEMMEM SETENV \
+			 STRCASESTR STRNDUP STRNLEN STRSEP SYSCONF \
+			 PROC_PID PRCTL PR_SET_NAME __PROGNAME; do
+			write_define "HAVE_$f"
+		done
+	fi
 	test "$HAVE_QUEUE_H" = yes && write_define HAVE_QUEUE_H
 	printf '\n'
 
-	# macOS workarounds.
-	write_define BROKEN___DEAD
-	write_define BROKEN_CMSG_FIRSTHDR
-	printf '\n'
-
-	# Functions present on macOS.
-	for f in ASPRINTF B64_NTOP CFMAKERAW CLOCK_GETTIME DAEMON DIRFD \
-		 FGETLN FLOCK FORKPTY GETDTABLESIZE GETLINE \
-		 GETPEEREID GETPROGNAME MEMMEM PROC_PIDINFO SETENV \
-		 STRCASESTR STRLCAT STRLCPY STRNDUP STRNLEN STRSEP STRTONUM \
-		 SYSCONF SYS_SIGNAME __PROGNAME; do
-		write_define "HAVE_$f"
-	done
+	# Results from probes (logic is the same; values differ by platform).
 	test "$HAVE_REALLOCARRAY" = yes && write_define HAVE_REALLOCARRAY
+	test "$HAVE_B64_NTOP" = yes && write_define HAVE_B64_NTOP
+	test "$HAVE_CLOSEFROM" = yes && write_define HAVE_CLOSEFROM
+	test "$HAVE_EXPLICIT_BZERO" = yes && write_define HAVE_EXPLICIT_BZERO
+	test "$HAVE_FGETLN" = yes && write_define HAVE_FGETLN
+	test "$HAVE_FORKPTY" = yes && write_define HAVE_FORKPTY
+	test "$HAVE_GETPEEREID" = yes && write_define HAVE_GETPEEREID
+	test "$HAVE_GETPROGNAME" = yes && write_define HAVE_GETPROGNAME
+	test "$HAVE_PROC_PIDINFO" = yes && write_define HAVE_PROC_PIDINFO
+	test "$HAVE_STRLCAT" = yes && write_define HAVE_STRLCAT
+	test "$HAVE_STRLCPY" = yes && write_define HAVE_STRLCPY
+	test "$HAVE_STRTONUM" = yes && write_define HAVE_STRTONUM
+	test "$HAVE_SYS_SIGNAME" = yes && write_define HAVE_SYS_SIGNAME
 	printf '\n'
 
 	# Optional features.
@@ -199,7 +336,7 @@ TMUX_DEFS="$TMUX_DEFS -DTMUX_CONF='\"$SYSCONFDIR/tmux.conf:~/.tmux.conf:\$\$XDG_
 TMUX_DEFS="$TMUX_DEFS -DTMUX_LOCK_CMD='\"lock -np\"'"
 TMUX_DEFS="$TMUX_DEFS -DTMUX_TERM='\"tmux-256color\"'"
 
-LIBS_ALL="$LIBEVENT_LIBS $UTF8PROC_LIBS -lresolv -lm"
+LIBS_ALL="$LIBEVENT_LIBS $UTF8PROC_LIBS $LIBS_EXTRA -lm"
 LDFLAGS_ALL="${LDFLAGS:-}"
 
 # Source file lists.
@@ -235,11 +372,10 @@ cmd-swap-pane.c cmd-swap-window.c cmd-switch-client.c cmd-unbind-key.c
 cmd-wait-for.c
 "
 
+# Compat sources always compiled.
 COMPAT_SOURCES="
 compat/closefrom.c
 compat/daemon.c
-compat/daemon-darwin.c
-compat/explicit_bzero.c
 compat/fdforkpty.c
 compat/freezero.c
 compat/getdtablecount.c
@@ -254,12 +390,22 @@ compat/vis.c
 compat/unvis.c
 "
 
-test "$HAVE_REALLOCARRAY" = no && \
-	COMPAT_SOURCES="$COMPAT_SOURCES compat/reallocarray.c"
-test "$HAVE_UTF8PROC" = yes && \
-	COMPAT_SOURCES="$COMPAT_SOURCES compat/utf8proc.c"
+# Add platform-specific compat sources.
+COMPAT_SOURCES="$COMPAT_SOURCES $EXTRA_COMPAT"
 
-EXTRA_SOURCES="osdep-darwin.c"
+# Add compat sources for probed-absent functions.
+test "$HAVE_EXPLICIT_BZERO" = no && COMPAT_SOURCES="$COMPAT_SOURCES compat/explicit_bzero.c"
+test "$HAVE_B64_NTOP"       = no && COMPAT_SOURCES="$COMPAT_SOURCES compat/base64.c"
+test "$HAVE_FGETLN"         = no && COMPAT_SOURCES="$COMPAT_SOURCES compat/fgetln.c"
+test "$HAVE_GETPEEREID"     = no && COMPAT_SOURCES="$COMPAT_SOURCES compat/getpeereid.c"
+test "$HAVE_GETPROGNAME"    = no && COMPAT_SOURCES="$COMPAT_SOURCES compat/getprogname.c"
+test "$HAVE_STRLCAT"        = no && COMPAT_SOURCES="$COMPAT_SOURCES compat/strlcat.c"
+test "$HAVE_STRLCPY"        = no && COMPAT_SOURCES="$COMPAT_SOURCES compat/strlcpy.c"
+test "$HAVE_STRTONUM"       = no && COMPAT_SOURCES="$COMPAT_SOURCES compat/strtonum.c"
+test "$HAVE_REALLOCARRAY"   = no && COMPAT_SOURCES="$COMPAT_SOURCES compat/reallocarray.c"
+test "$HAVE_UTF8PROC"       = yes && COMPAT_SOURCES="$COMPAT_SOURCES compat/utf8proc.c"
+
+EXTRA_SOURCES="$OSDEP"
 test "$ENABLE_SIXEL" = yes && \
 	EXTRA_SOURCES="$EXTRA_SOURCES image.c image-sixel.c"
 
