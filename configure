@@ -483,4 +483,4 @@ NINJAEOF
 } > build.ninja
 printf 'generated build.ninja\n'
 
-printf '\nready: ninja\n'
+printf '\nready: ninja|samu\n'
