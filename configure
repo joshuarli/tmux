@@ -82,17 +82,6 @@ else
 	die "libevent >= 2 not found (brew install libevent)"
 fi
 
-# Detect ncurses.
-if $PKG_CONFIG --exists ncurses 2>/dev/null; then
-	NCURSES_CFLAGS=$($PKG_CONFIG --cflags ncurses)
-	NCURSES_LIBS=$($PKG_CONFIG --libs ncurses)
-	printf 'ncurses: %s\n' "$($PKG_CONFIG --modversion ncurses)"
-else
-	NCURSES_CFLAGS=""
-	NCURSES_LIBS="-lncurses"
-	printf 'ncurses: system\n'
-fi
-
 # Detect utf8proc.
 HAVE_UTF8PROC=no
 UTF8PROC_CFLAGS=""
@@ -114,9 +103,9 @@ fi
 try_compile() {
 	cat > "$TMPDIR/test.c"
 	# shellcheck disable=SC2086
-	$CC $LIBEVENT_CFLAGS $NCURSES_CFLAGS \
+	$CC $LIBEVENT_CFLAGS \
 		-o "$TMPDIR/test" "$TMPDIR/test.c" \
-		$LIBEVENT_LIBS $NCURSES_LIBS -lresolv 2>/dev/null
+		$LIBEVENT_LIBS -lresolv 2>/dev/null
 }
 
 # Test for reallocarray.
@@ -142,12 +131,6 @@ then
 	HAVE_QUEUE_H=yes
 fi
 
-# Test for tiparm_s.
-HAVE_TIPARM_S=no
-if printf '#include <curses.h>\n#include <term.h>\nint main(void){tiparm_s(0,0,0);return 0;}' | try_compile; then
-	HAVE_TIPARM_S=yes
-fi
-
 printf '\n'
 
 # Generate config.h.
@@ -158,7 +141,7 @@ write_define() { printf '#define %s 1\n' "$1"; }
 
 	# Headers.
 	for h in BITSTRING_H DIRENT_H ERR_H EVENT2_EVENT_H FCNTL_H \
-		 INTTYPES_H LIBPROC_H NCURSES_H PATHS_H STDINT_H UTIL_H; do
+		 INTTYPES_H LIBPROC_H PATHS_H STDINT_H UTIL_H; do
 		write_define "HAVE_$h"
 	done
 	test "$HAVE_QUEUE_H" = yes && write_define HAVE_QUEUE_H
@@ -174,11 +157,10 @@ write_define() { printf '#define %s 1\n' "$1"; }
 		 FGETLN FLOCK FORKPTY GETDTABLESIZE GETLINE \
 		 GETPEEREID GETPROGNAME MEMMEM PROC_PIDINFO SETENV \
 		 STRCASESTR STRLCAT STRLCPY STRNDUP STRNLEN STRSEP STRTONUM \
-		 SYSCONF SYS_SIGNAME TIPARM __PROGNAME; do
+		 SYSCONF SYS_SIGNAME __PROGNAME; do
 		write_define "HAVE_$f"
 	done
 	test "$HAVE_REALLOCARRAY" = yes && write_define HAVE_REALLOCARRAY
-	test "$HAVE_TIPARM_S" = yes && write_define HAVE_TIPARM_S
 	printf '\n'
 
 	# Optional features.
@@ -209,7 +191,7 @@ fi
 CFLAGS_BASE="$CFLAGS_BASE -Wno-deprecated-declarations -Wno-macro-redefined"
 CFLAGS_BASE="$CFLAGS_BASE ${CFLAGS:-}"
 
-CPPFLAGS_ALL="$LIBEVENT_CFLAGS $NCURSES_CFLAGS $UTF8PROC_CFLAGS"
+CPPFLAGS_ALL="$LIBEVENT_CFLAGS $UTF8PROC_CFLAGS"
 CPPFLAGS_ALL="$CPPFLAGS_ALL ${CPPFLAGS:-}"
 
 TMUX_DEFS="-DTMUX_VERSION='\"$VERSION\"'"
@@ -217,7 +199,7 @@ TMUX_DEFS="$TMUX_DEFS -DTMUX_CONF='\"$SYSCONFDIR/tmux.conf:~/.tmux.conf:\$\$XDG_
 TMUX_DEFS="$TMUX_DEFS -DTMUX_LOCK_CMD='\"lock -np\"'"
 TMUX_DEFS="$TMUX_DEFS -DTMUX_TERM='\"tmux-256color\"'"
 
-LIBS_ALL="$LIBEVENT_LIBS $NCURSES_LIBS $UTF8PROC_LIBS -lresolv -lm"
+LIBS_ALL="$LIBEVENT_LIBS $UTF8PROC_LIBS -lresolv -lm"
 LDFLAGS_ALL="${LDFLAGS:-}"
 
 # Source file lists.
