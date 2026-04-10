@@ -984,6 +984,8 @@ static const char *tmux_256color_caps[] = {
 	"smso=\033[7m",
 	"smul=\033[4m",
 	"tsl=\033]0;",
+	/* OSC 52 clipboard set: Ms=%p1%s is clip target, %p2%s is base64 data */
+	"Ms=\033]52;%p1%s;%p2%s\007",
 	NULL
 };
 
