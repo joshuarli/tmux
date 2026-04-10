@@ -266,9 +266,12 @@ write_define() { printf '#define %s 1\n' "$1"; }
 			write_define "HAVE_$f"
 		done
 	else
+		# Required for wcwidth, getline, and other POSIX/GNU extensions.
+		printf '#define _GNU_SOURCE 1\n\n'
+
 		# Headers always present on Linux.
 		for h in DIRENT_H ERR_H EVENT2_EVENT_H FCNTL_H \
-			 INTTYPES_H PATHS_H STDINT_H; do
+			 INTTYPES_H PATHS_H PTY_H STDINT_H; do
 			write_define "HAVE_$h"
 		done
 		printf '\n'
