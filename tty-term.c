@@ -989,29 +989,186 @@ static const char *tmux_256color_caps[] = {
 	NULL
 };
 
+static const char *xterm_256color_caps[] = {
+	/* flags */
+	"am=1", "bce=1", "km=1", "mir=1", "msgr=1", "xenl=1",
+	/* numbers */
+	"colors=256",
+	/* strings */
+	"acsc=``aaffggiijjkkllmmnnooppqqrrssttuuvvwwxxyyzz{{||}}~~",
+	"bel=\007",
+	"blink=\033[5m",
+	"bold=\033[1m",
+	"civis=\033[?25l",
+	"clear=\033[H\033[2J",
+	"cnorm=\033[?12l\033[?25h",
+	"csr=\033[%i%p1%d;%p2%dr",
+	"cub1=\010",
+	"cub=\033[%p1%dD",
+	"cud1=\012",
+	"cud=\033[%p1%dB",
+	"cuf1=\033[C",
+	"cuf=\033[%p1%dC",
+	"cup=\033[%i%p1%d;%p2%dH",
+	"cuu1=\033[A",
+	"cuu=\033[%p1%dA",
+	"cvvis=\033[?12;25h",
+	"dch1=\033[P",
+	"dch=\033[%p1%dP",
+	"dim=\033[2m",
+	"dl1=\033[M",
+	"dl=\033[%p1%dM",
+	"ech=\033[%p1%dX",
+	"ed=\033[J",
+	"el1=\033[1K",
+	"el=\033[K",
+	"home=\033[H",
+	"hpa=\033[%i%p1%dG",
+	"ich=\033[%p1%d@",
+	"il1=\033[L",
+	"il=\033[%p1%dL",
+	"indn=\033[%p1%dS",
+	"invis=\033[8m",
+	"kDC=\033[3;2~",
+	"kEND=\033[1;2F",
+	"kHOM=\033[1;2H",
+	"kIC=\033[2;2~",
+	"kLFT=\033[1;2D",
+	"kNXT=\033[6;2~",
+	"kPRV=\033[5;2~",
+	"kRIT=\033[1;2C",
+	"kcbt=\033[Z",
+	"kcub1=\033OD",
+	"kcud1=\033OB",
+	"kcuf1=\033OC",
+	"kcuu1=\033OA",
+	"kdch1=\033[3~",
+	"kend=\033OF",
+	"kf1=\033OP",
+	"kf10=\033[21~",
+	"kf11=\033[23~",
+	"kf12=\033[24~",
+	"kf13=\033[1;2P",
+	"kf14=\033[1;2Q",
+	"kf15=\033[1;2R",
+	"kf16=\033[1;2S",
+	"kf17=\033[15;2~",
+	"kf18=\033[17;2~",
+	"kf19=\033[18;2~",
+	"kf2=\033OQ",
+	"kf20=\033[19;2~",
+	"kf21=\033[20;2~",
+	"kf22=\033[21;2~",
+	"kf23=\033[23;2~",
+	"kf24=\033[24;2~",
+	"kf25=\033[1;5P",
+	"kf26=\033[1;5Q",
+	"kf27=\033[1;5R",
+	"kf28=\033[1;5S",
+	"kf29=\033[15;5~",
+	"kf3=\033OR",
+	"kf30=\033[17;5~",
+	"kf31=\033[18;5~",
+	"kf32=\033[19;5~",
+	"kf33=\033[20;5~",
+	"kf34=\033[21;5~",
+	"kf35=\033[23;5~",
+	"kf36=\033[24;5~",
+	"kf37=\033[1;6P",
+	"kf38=\033[1;6Q",
+	"kf39=\033[1;6R",
+	"kf4=\033OS",
+	"kf40=\033[1;6S",
+	"kf41=\033[15;6~",
+	"kf42=\033[17;6~",
+	"kf43=\033[18;6~",
+	"kf44=\033[19;6~",
+	"kf45=\033[20;6~",
+	"kf46=\033[21;6~",
+	"kf47=\033[23;6~",
+	"kf48=\033[24;6~",
+	"kf49=\033[1;3P",
+	"kf5=\033[15~",
+	"kf50=\033[1;3Q",
+	"kf51=\033[1;3R",
+	"kf52=\033[1;3S",
+	"kf53=\033[15;3~",
+	"kf54=\033[17;3~",
+	"kf55=\033[18;3~",
+	"kf56=\033[19;3~",
+	"kf57=\033[20;3~",
+	"kf58=\033[21;3~",
+	"kf59=\033[23;3~",
+	"kf6=\033[17~",
+	"kf60=\033[24;3~",
+	"kf61=\033[1;4P",
+	"kf62=\033[1;4Q",
+	"kf63=\033[1;4R",
+	"kf7=\033[18~",
+	"kf8=\033[19~",
+	"kf9=\033[20~",
+	"khome=\033OH",
+	"kich1=\033[2~",
+	"kind=\033[1;2B",
+	"kmous=\033[M",
+	"knp=\033[6~",
+	"kpp=\033[5~",
+	"kri=\033[1;2A",
+	"op=\033[39;49m",
+	"rev=\033[7m",
+	"ri=\033M",
+	"rin=\033[%p1%dT",
+	"ritm=\033[23m",
+	"rmacs=\033(B",
+	"rmcup=\033[?1049l",
+	"rmkx=\033[?1l\033>",
+	"setab=\033[%?%p1%{8}%<%t4%p1%d%e%p1%{16}%<%t10%p1%{8}%-%d%e48;5;%p1%d%;m",
+	"setaf=\033[%?%p1%{8}%<%t3%p1%d%e%p1%{16}%<%t9%p1%{8}%-%d%e38;5;%p1%d%;m",
+	"sgr0=\033(B\033[m",
+	"sitm=\033[3m",
+	"smacs=\033(0",
+	"smcup=\033[?1049h",
+	"smkx=\033[?1h\033=",
+	"smso=\033[7m",
+	"smul=\033[4m",
+	"vpa=\033[%i%p1%dd",
+	/* OSC 52 clipboard set: Ms=%p1%s is clip target, %p2%s is base64 data */
+	"Ms=\033]52;%p1%s;%p2%s\007",
+	NULL
+};
+
+static void
+load_caps(const char **src, char ***caps, u_int *ncaps)
+{
+	u_int	i;
+
+	*ncaps = 0;
+	*caps = NULL;
+	for (i = 0; src[i] != NULL; i++) {
+		*caps = xreallocarray(*caps, (*ncaps) + 1, sizeof **caps);
+		(*caps)[*ncaps] = xstrdup(src[i]);
+		(*ncaps)++;
+	}
+}
+
 int
 tty_term_read_list(const char *name, int fd, char ***caps, u_int *ncaps,
     char **cause)
 {
-	u_int	i;
-
 	(void)fd;
 
-	if (strcmp(name, "tmux-256color") != 0) {
-		xasprintf(cause, "unsupported terminal: %s "
-		    "(only tmux-256color is supported without ncurses)", name);
-		return (-1);
+	if (strcmp(name, "tmux-256color") == 0) {
+		load_caps(tmux_256color_caps, caps, ncaps);
+		return (0);
 	}
-
-	*ncaps = 0;
-	*caps = NULL;
-
-	for (i = 0; tmux_256color_caps[i] != NULL; i++) {
-		*caps = xreallocarray(*caps, (*ncaps) + 1, sizeof **caps);
-		(*caps)[*ncaps] = xstrdup(tmux_256color_caps[i]);
-		(*ncaps)++;
+	if (strcmp(name, "xterm-256color") == 0) {
+		load_caps(xterm_256color_caps, caps, ncaps);
+		return (0);
 	}
-	return (0);
+	xasprintf(cause, "unsupported terminal: %s "
+	    "(only tmux-256color and xterm-256color are supported without ncurses)",
+	    name);
+	return (-1);
 }
 
 void
