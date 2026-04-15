@@ -34,6 +34,7 @@
 
 static int	tty_log_fd = -1;
 
+static int	tty_has_dynamic_queries(struct tty *);
 static void	tty_start_timer_callback(int, short, void *);
 static void	tty_clipboard_query_callback(int, short, void *);
 static void	tty_set_italics(struct tty *);
@@ -82,6 +83,20 @@ static void	tty_write_one(void (*)(struct tty *, const struct tty_ctx *),
 
 #define TTY_QUERY_TIMEOUT 5
 #define TTY_REQUEST_LIMIT 30
+
+static int
+tty_has_dynamic_queries(struct tty *tty)
+{
+	const char	*name = tty->client->term_name;
+
+	if (name == NULL)
+		return (1);
+	if (strcmp(name, "tmux-256color") == 0)
+		return (0);
+	if (strcmp(name, "xterm-256color") == 0)
+		return (0);
+	return (1);
+}
 
 void
 tty_create_log(void)
@@ -137,6 +152,7 @@ tty_resize(struct tty *tty)
 		if ((xpixel == 0 || ypixel == 0) &&
 		    tty->out != NULL &&
 		    !(tty->flags & TTY_WINSIZEQUERY) &&
+		    tty_has_dynamic_queries(tty) &&
 		    (tty->term->flags & TERM_VT100LIKE)) {
 			tty_puts(tty, "\033[18t\033[14t");
 			tty->flags |= TTY_WINSIZEQUERY;
@@ -365,12 +381,16 @@ tty_start_tty(struct tty *tty)
 	if (tty_term_has(tty->term, TTYC_ENBP))
 		tty_putcode(tty, TTYC_ENBP);
 
-	if (tty->term->flags & TERM_VT100LIKE) {
+	if (tty_has_dynamic_queries(tty) &&
+	    (tty->term->flags & TERM_VT100LIKE)) {
 		/* Subscribe to theme changes and request theme now. */
 		tty_puts(tty, "\033[?2031h\033[?996n");
 	}
 
-	tty_start_start_timer(tty);
+	if (tty_has_dynamic_queries(tty))
+		tty_start_start_timer(tty);
+	else
+		tty->flags |= TTY_ALL_REQUEST_FLAGS;
 
 	tty->flags |= TTY_STARTED;
 	tty_invalidate(tty);
@@ -388,6 +408,10 @@ tty_send_requests(struct tty *tty)
 {
 	if (~tty->flags & TTY_STARTED)
 		return;
+	if (!tty_has_dynamic_queries(tty)) {
+		tty->flags |= TTY_ALL_REQUEST_FLAGS;
+		return;
+	}
 
 	if (tty->term->flags & TERM_VT100LIKE) {
 		if (~tty->flags & TTY_HAVEDA)
@@ -412,6 +436,10 @@ tty_repeat_requests(struct tty *tty, int force)
 
 	if (~tty->flags & TTY_STARTED)
 		return;
+	if (!tty_has_dynamic_queries(tty)) {
+		tty->flags |= TTY_ALL_REQUEST_FLAGS;
+		return;
+	}
 
 	if (!force && n <= TTY_REQUEST_LIMIT) {
 		log_debug("%s: not repeating requests (%u seconds)", c->name,
