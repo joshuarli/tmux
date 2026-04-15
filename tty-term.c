@@ -774,7 +774,24 @@ tparm_skip_to_end(const char *s)
 	return s;
 }
 
-static char tparm_buf[4096];
+static char	*tparm_buf;
+static size_t	 tparm_size;
+
+static void
+tparm_ensure(size_t needed)
+{
+	size_t	new_size;
+
+	if (needed <= tparm_size)
+		return;
+
+	new_size = tparm_size != 0 ? tparm_size : 256;
+	while (new_size < needed)
+		new_size *= 2;
+
+	tparm_buf = xrealloc(tparm_buf, new_size);
+	tparm_size = new_size;
+}
 
 static const char *
 tmux_tparm(const char *s, long p1, long p2, long p3, long p4,
@@ -789,14 +806,17 @@ tmux_tparm(const char *s, long p1, long p2, long p3, long p4,
 	const char     *sv;
 	int		len, n;
 	long		a, b;
+	char		numbuf[64];
 
 #define PUSH(x)  do { if (sp < 32) stack[sp++] = (x); } while (0)
 #define POP()    (sp > 0 ? stack[--sp] : 0L)
 #define OUTC(c)  do { \
-    if (outlen < sizeof tparm_buf - 1) tparm_buf[outlen++] = (char)(c); \
+	tparm_ensure(outlen + 2); \
+	tparm_buf[outlen++] = (char)(c); \
 } while (0)
 
 	memset(if_stack, 0, sizeof if_stack);
+	tparm_ensure(1);
 
 	while (*s != '\0') {
 		if (*s != '%') {
@@ -810,10 +830,12 @@ tmux_tparm(const char *s, long p1, long p2, long p3, long p4,
 			break;
 		case 'd':
 			a = POP();
-			len = snprintf(tparm_buf + outlen,
-			    sizeof tparm_buf - outlen, "%ld", a);
-			if (len > 0)
+			len = xsnprintf(numbuf, sizeof numbuf, "%ld", a);
+			if (len > 0) {
+				tparm_ensure(outlen + (size_t)len + 1);
+				memcpy(tparm_buf + outlen, numbuf, (size_t)len);
 				outlen += (size_t)len;
+			}
 			break;
 		case 'c':
 			OUTC(POP());
@@ -821,9 +843,10 @@ tmux_tparm(const char *s, long p1, long p2, long p3, long p4,
 		case 's':
 			sv = (const char *)(intptr_t)POP();
 			if (sv != NULL) {
-				while (*sv != '\0' &&
-				    outlen < sizeof tparm_buf - 1)
-					tparm_buf[outlen++] = *sv++;
+				len = strlen(sv);
+				tparm_ensure(outlen + (size_t)len + 1);
+				memcpy(tparm_buf + outlen, sv, (size_t)len);
+				outlen += (size_t)len;
 			}
 			break;
 		case 'p':
@@ -891,6 +914,7 @@ tmux_tparm(const char *s, long p1, long p2, long p3, long p4,
 			break;
 		}
 	}
+	tparm_ensure(outlen + 1);
 	tparm_buf[outlen] = '\0';
 	return tparm_buf;
 
