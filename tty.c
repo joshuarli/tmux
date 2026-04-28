@@ -2100,6 +2100,10 @@ tty_set_selection(struct tty *tty, const char *clip, const char *buf,
 		return;
 	if (!tty_term_has(tty->term, TTYC_MS))
 		return;
+	if (len > TTY_CLIPBOARD_MAX) {
+		log_debug("%s: oversized OSC 52 payload dropped", __func__);
+		return;
+	}
 
 	size = 4 * ((len + 2) / 3) + 1; /* storage for base64 */
 	encoded = xmalloc(size);

@@ -173,6 +173,7 @@ static void	input_osc_110(struct input_ctx *, const char *);
 static void	input_osc_111(struct input_ctx *, const char *);
 static void	input_osc_112(struct input_ctx *, const char *);
 static void	input_osc_133(struct input_ctx *, const char *);
+static int	input_osc_52_too_large(const u_char *, size_t);
 
 /* Transition entry/exit handlers. */
 static void	input_clear(struct input_ctx *);
@@ -2603,6 +2604,11 @@ input_dcs_dispatch(struct input_ctx *ictx)
 	log_debug("%s: \"%s\"", __func__, buf);
 
 	if (len >= prefixlen && strncmp(buf, prefix, prefixlen) == 0) {
+		if (input_osc_52_too_large(buf + prefixlen, len - prefixlen)) {
+			log_debug("%s: oversized OSC 52 passthrough dropped",
+			    __func__);
+			return (0);
+		}
 		screen_write_rawstring(sctx, buf + prefixlen, len - prefixlen,
 		    allow_passthrough == 2);
 	}
@@ -2848,6 +2854,42 @@ input_osc_colour_reply(struct input_ctx *ictx, int add, u_int n, int idx, int c,
 		    "\033]%u;rgb:%02hhx%02hhx/%02hhx%02hhx/%02hhx%02hhx%s",
 		    n, r, r, g, g, b, b, end);
 	}
+}
+
+/*
+ * Oversized OSC 52 payloads can wedge some terminals and bypass tmux's usual
+ * output backpressure because passthrough writes are sent as an all-or-nothing
+ * control sequence.
+ */
+static int
+input_osc_52_too_large(const u_char *buf, size_t len)
+{
+	size_t	i, start, end;
+
+	if (len < 6 || buf[0] != '\033' || buf[1] != ']' || buf[2] != '5' ||
+	    buf[3] != '2' || buf[4] != ';')
+		return (0);
+
+	for (i = 5; i < len; i++) {
+		if (buf[i] == ';')
+			break;
+	}
+	if (i == len)
+		return (0);
+	start = i + 1;
+
+	for (end = start; end < len; end++) {
+		if (buf[end] == '\007')
+			break;
+		if (end + 1 < len && buf[end] == '\033' && buf[end + 1] == '\\')
+			break;
+	}
+	if (end == len)
+		return (0);
+	if (end == start + 1 && buf[start] == '?')
+		return (0);
+
+	return (((end - start) / 4) * 3 > TTY_CLIPBOARD_MAX);
 }
 
 /* Handle the OSC 4 sequence for setting (multiple) palette entries. */

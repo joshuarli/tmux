@@ -3065,6 +3065,7 @@ void	 recalculate_sizes_now(int);
 
 /* input.c */
 #define INPUT_BUF_DEFAULT_SIZE 1048576
+#define TTY_CLIPBOARD_MAX 1048576
 struct input_ctx *input_init(struct window_pane *, struct bufferevent *,
 	     struct colour_palette *, struct client *);
 void	 input_free(struct input_ctx *);
@@ -3475,7 +3476,7 @@ int	 mode_tree_down(struct mode_tree_data *, int);
 struct mode_tree_data *mode_tree_start(struct window_pane *, struct args *,
 	     mode_tree_build_cb, mode_tree_draw_cb, mode_tree_search_cb,
 	     mode_tree_menu_cb, mode_tree_height_cb, mode_tree_key_cb,
-	     mode_tree_swap_cb, mode_tree_sort_cb, void *, 
+	     mode_tree_swap_cb, mode_tree_sort_cb, void *,
 	     const struct menu_item *, struct screen **);
 void	 mode_tree_zoom(struct mode_tree_data *, struct args *);
 void	 mode_tree_build(struct mode_tree_data *);
