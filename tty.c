@@ -21,7 +21,6 @@
 
 #include <netinet/in.h>
 
-#include <curses.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <resolv.h>

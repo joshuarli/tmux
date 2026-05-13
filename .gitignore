@@ -22,3 +22,7 @@ fuzz/*-fuzzer
 tags
 tmux
 tmux.1.*
+.ninja*
+build.ninja
+cmd-parse.h
+config.h

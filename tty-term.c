@@ -18,15 +18,10 @@
 
 #include <sys/types.h>
 
-#if defined(HAVE_CURSES_H)
-#include <curses.h>
-#elif defined(HAVE_NCURSES_H)
-#include <ncurses.h>
-#endif
 #include <fnmatch.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include <term.h>
 
 #include "tmux.h"
 
@@ -280,7 +275,6 @@ static const struct tty_term_code_entry tty_term_codes[] = {
 	[TTYC_SMULX] = { TTYCODE_STRING, "Smulx" },
 	[TTYC_SMUL] = { TTYCODE_STRING, "smul" },
 	[TTYC_SMXX] =  { TTYCODE_STRING, "smxx" },
-	[TTYC_SPB] = { TTYCODE_STRING, "Spb" },
 	[TTYC_SS] = { TTYCODE_STRING, "Ss" },
 	[TTYC_SWD] = { TTYCODE_STRING, "Swd" },
 	[TTYC_SYNC] = { TTYCODE_STRING, "Sync" },
@@ -400,6 +394,8 @@ tty_term_apply(struct tty_term *term, const char *capabilities, int quiet)
 
 		for (i = 0; i < tty_term_ncodes(); i++) {
 			ent = &tty_term_codes[i];
+			if (ent->name == NULL)
+				continue;
 			if (strcmp(s, ent->name) != 0)
 				continue;
 			code = &term->codes[i];
@@ -555,6 +551,8 @@ tty_term_create(struct tty *tty, char *name, char **caps, u_int ncaps,
 
 		for (j = 0; j < tty_term_ncodes(); j++) {
 			ent = &tty_term_codes[j];
+			if (ent->name == NULL)
+				continue;
 			if (strncmp(ent->name, caps[i], namelen) != 0)
 				continue;
 			if (ent->name[namelen] != '\0')
@@ -600,11 +598,6 @@ tty_term_create(struct tty *tty, char *name, char **caps, u_int ncaps,
 		a = options_array_next(a);
 	}
 
-	/* Delete curses data. */
-#if !defined(NCURSES_VERSION_MAJOR) || NCURSES_VERSION_MAJOR > 5 || \
-    (NCURSES_VERSION_MAJOR == 5 && NCURSES_VERSION_MINOR > 6)
-	del_curterm(cur_term);
-#endif
 	/* Check for COLORTERM. */
 	envent = environ_find(tty->client->environ, "COLORTERM");
 	if (envent != NULL) {
@@ -686,78 +679,372 @@ tty_term_free(struct tty_term *term)
 	free(term);
 }
 
+/*
+ * Terminfo parameterized string interpreter, replacing ncurses tparm/tiparm.
+ * Implements the full terminfo parameter language (stack machine with
+ * arithmetic, conditionals, string params). Returns a static buffer.
+ */
+
+static const char *
+tparm_skip_to_eb(const char *s)
+{
+	/* Skip forward to matching %e or %; at depth 0. Returns ptr to the %. */
+	int	depth = 0;
+
+	while (*s != '\0') {
+		if (*s != '%') {
+			s++;
+			continue;
+		}
+		switch (*(s + 1)) {
+		case '?':
+			depth++;
+			s += 2;
+			break;
+		case 'e':
+			if (depth == 0)
+				return s;
+			s += 2;
+			break;
+		case ';':
+			if (depth == 0)
+				return s;
+			depth--;
+			s += 2;
+			break;
+		case '{':
+			s += 2;
+			while (*s != '\0' && *s != '}')
+				s++;
+			if (*s != '\0')
+				s++;
+			break;
+		case '\'':
+			s += 2;
+			if (*s != '\0')
+				s++;
+			if (*s == '\'')
+				s++;
+			break;
+		default:
+			s += 2;
+			break;
+		}
+	}
+	return s;
+}
+
+static const char *
+tparm_skip_to_end(const char *s)
+{
+	/* Skip forward to matching %; at depth 0. Returns ptr to the %. */
+	int	depth = 0;
+
+	while (*s != '\0') {
+		if (*s != '%') {
+			s++;
+			continue;
+		}
+		switch (*(s + 1)) {
+		case '?':
+			depth++;
+			s += 2;
+			break;
+		case ';':
+			if (depth == 0)
+				return s;
+			depth--;
+			s += 2;
+			break;
+		case '{':
+			s += 2;
+			while (*s != '\0' && *s != '}')
+				s++;
+			if (*s != '\0')
+				s++;
+			break;
+		case '\'':
+			s += 2;
+			if (*s != '\0')
+				s++;
+			if (*s == '\'')
+				s++;
+			break;
+		default:
+			s += 2;
+			break;
+		}
+	}
+	return s;
+}
+
+static char	*tparm_buf;
+static size_t	 tparm_size;
+
+static void
+tparm_ensure(size_t needed)
+{
+	size_t	new_size;
+
+	if (needed <= tparm_size)
+		return;
+
+	new_size = tparm_size != 0 ? tparm_size : 256;
+	while (new_size < needed)
+		new_size *= 2;
+
+	tparm_buf = xrealloc(tparm_buf, new_size);
+	tparm_size = new_size;
+}
+
+static const char *
+tmux_tparm(const char *s, long p1, long p2, long p3, long p4,
+    long p5, long p6, long p7, long p8, long p9)
+{
+	long		params[9] = { p1, p2, p3, p4, p5, p6, p7, p8, p9 };
+	long		stack[32];
+	int		sp = 0;
+	size_t		outlen = 0;
+	int		if_stack[16];
+	int		if_level = 0;
+	const char     *sv;
+	int		len, n;
+	long		a, b;
+	char		numbuf[64];
+
+#define PUSH(x)  do { if (sp < 32) stack[sp++] = (x); } while (0)
+#define POP()    (sp > 0 ? stack[--sp] : 0L)
+#define OUTC(c)  do { \
+	tparm_ensure(outlen + 2); \
+	tparm_buf[outlen++] = (char)(c); \
+} while (0)
+
+	memset(if_stack, 0, sizeof if_stack);
+	tparm_ensure(1);
+
+	while (*s != '\0') {
+		if (*s != '%') {
+			OUTC(*s++);
+			continue;
+		}
+		s++; /* consume '%' */
+		switch (*s++) {
+		case '%':
+			OUTC('%');
+			break;
+		case 'd':
+			a = POP();
+			len = xsnprintf(numbuf, sizeof numbuf, "%ld", a);
+			if (len > 0) {
+				tparm_ensure(outlen + (size_t)len + 1);
+				memcpy(tparm_buf + outlen, numbuf, (size_t)len);
+				outlen += (size_t)len;
+			}
+			break;
+		case 'c':
+			OUTC(POP());
+			break;
+		case 's':
+			sv = (const char *)(intptr_t)POP();
+			if (sv != NULL) {
+				len = strlen(sv);
+				tparm_ensure(outlen + (size_t)len + 1);
+				memcpy(tparm_buf + outlen, sv, (size_t)len);
+				outlen += (size_t)len;
+			}
+			break;
+		case 'p':
+			n = *s++ - '1';
+			PUSH(n >= 0 && n < 9 ? params[n] : 0L);
+			break;
+		case '\'':
+			PUSH((unsigned char)*s);
+			if (*s != '\0') s++;
+			if (*s == '\'') s++;
+			break;
+		case '{':
+			n = 0;
+			while (*s >= '0' && *s <= '9')
+				n = n * 10 + (*s++ - '0');
+			if (*s == '}') s++;
+			PUSH((long)n);
+			break;
+		case 'l':
+			sv = (const char *)(intptr_t)POP();
+			PUSH(sv != NULL ? (long)strlen(sv) : 0L);
+			break;
+		case 'i':
+			params[0]++;
+			params[1]++;
+			break;
+		case '+': b = POP(); a = POP(); PUSH(a + b); break;
+		case '-': b = POP(); a = POP(); PUSH(a - b); break;
+		case '*': b = POP(); a = POP(); PUSH(a * b); break;
+		case '/': b = POP(); a = POP(); PUSH(b != 0 ? a / b : 0L); break;
+		case 'm': b = POP(); a = POP(); PUSH(b != 0 ? a % b : 0L); break;
+		case '&': b = POP(); a = POP(); PUSH(a & b); break;
+		case '|': b = POP(); a = POP(); PUSH(a | b); break;
+		case '^': b = POP(); a = POP(); PUSH(a ^ b); break;
+		case '=': b = POP(); a = POP(); PUSH(a == b ? 1L : 0L); break;
+		case '>': b = POP(); a = POP(); PUSH(a > b ? 1L : 0L); break;
+		case '<': b = POP(); a = POP(); PUSH(a < b ? 1L : 0L); break;
+		case 'A': b = POP(); a = POP(); PUSH(a && b ? 1L : 0L); break;
+		case 'O': b = POP(); a = POP(); PUSH(a || b ? 1L : 0L); break;
+		case '!': a = POP(); PUSH(!a ? 1L : 0L); break;
+		case '~': a = POP(); PUSH(~a); break;
+		case '?':
+			/* %? marks start of conditional; push a new if-level */
+			if (if_level < 15)
+				if_stack[++if_level] = 0;
+			break;
+		case 't':
+			/* %t: pop condition; skip then-part if false */
+			a = POP();
+			if_stack[if_level] = (int)(a != 0);
+			if (!a)
+				s = tparm_skip_to_eb(s);
+			break;
+		case 'e':
+			/* %e: skip else-part if then-part was taken */
+			if (if_level > 0 && if_stack[if_level])
+				s = tparm_skip_to_end(s);
+			break;
+		case ';':
+			/* %; ends the conditional */
+			if (if_level > 0)
+				if_level--;
+			break;
+		default:
+			break;
+		}
+	}
+	tparm_ensure(outlen + 1);
+	tparm_buf[outlen] = '\0';
+	return tparm_buf;
+
+#undef PUSH
+#undef POP
+#undef OUTC
+}
+
+/*
+ * Hardcoded terminfo capabilities for tmux-256color.
+ * Values are the raw binary escape sequences (same format as tigetstr returns).
+ * Parameterized strings keep their %p1/%d/etc. format for tmux_tparm.
+ * Only capabilities present in tty_term_codes are included.
+ */
+static const char *tmux_256color_caps[] = {
+	/* flags */
+	"am=1",
+	/* numbers */
+	"colors=256",
+	/* strings */
+	"acsc=++,,--..00``aaffgghhiijjkkllmmnnooppqqrrssttuuvvwwxxyyzz{{||}}~~",
+	"bel=\007",
+	"blink=\033[5m",
+	"bold=\033[1m",
+	"civis=\033[?25l",
+	"clear=\033[H\033[J",
+	"cnorm=\033[34h\033[?25h",
+	"csr=\033[%i%p1%d;%p2%dr",
+	"cub1=\010",
+	"cub=\033[%p1%dD",
+	"cud1=\012",
+	"cud=\033[%p1%dB",
+	"cuf1=\033[C",
+	"cuf=\033[%p1%dC",
+	"cup=\033[%i%p1%d;%p2%dH",
+	"cuu1=\033M",
+	"cuu=\033[%p1%dA",
+	"cvvis=\033[34l",
+	"dch1=\033[P",
+	"dch=\033[%p1%dP",
+	"dim=\033[2m",
+	"dl1=\033[M",
+	"dl=\033[%p1%dM",
+	"ed=\033[J",
+	"el1=\033[1K",
+	"el=\033[K",
+	"enacs=\033(B\033)0",
+	"fsl=\007",
+	"home=\033[H",
+	"ich=\033[%p1%d@",
+	"il1=\033[L",
+	"il=\033[%p1%dL",
+	"kcbt=\033[Z",
+	"kcub1=\033OD",
+	"kcud1=\033OB",
+	"kcuf1=\033OC",
+	"kcuu1=\033OA",
+	"kdch1=\033[3~",
+	"kend=\033[4~",
+	"kf1=\033OP",
+	"kf10=\033[21~",
+	"kf11=\033[23~",
+	"kf12=\033[24~",
+	"kf2=\033OQ",
+	"kf3=\033OR",
+	"kf4=\033OS",
+	"kf5=\033[15~",
+	"kf6=\033[17~",
+	"kf7=\033[18~",
+	"kf8=\033[19~",
+	"kf9=\033[20~",
+	"khome=\033[1~",
+	"kich1=\033[2~",
+	"kmous=\033[M",
+	"knp=\033[6~",
+	"kpp=\033[5~",
+	"op=\033[39;49m",
+	"rev=\033[7m",
+	"ri=\033M",
+	"ritm=\033[23m",
+	"rmacs=\017",
+	"rmcup=\033[?1049l",
+	"rmkx=\033[?1l\033>",
+	"setab=\033[%?%p1%{8}%<%t4%p1%d%e%p1%{16}%<%t10%p1%{8}%-%d%e48;5;%p1%d%;m",
+	"setaf=\033[%?%p1%{8}%<%t3%p1%d%e%p1%{16}%<%t9%p1%{8}%-%d%e38;5;%p1%d%;m",
+	"sgr0=\033[m\017",
+	"sitm=\033[3m",
+	"smacs=\016",
+	"smcup=\033[?1049h",
+	"smkx=\033[?1h\033=",
+	"smso=\033[7m",
+	"smul=\033[4m",
+	"tsl=\033]0;",
+	/* OSC 52 clipboard set: Ms=%p1%s is clip target, %p2%s is base64 data */
+	"Ms=\033]52;%p1%s;%p2%s\007",
+	NULL
+};
+
+
+static void
+load_caps(const char **src, char ***caps, u_int *ncaps)
+{
+	u_int	i;
+
+	*ncaps = 0;
+	*caps = NULL;
+	for (i = 0; src[i] != NULL; i++) {
+		*caps = xreallocarray(*caps, (*ncaps) + 1, sizeof **caps);
+		(*caps)[*ncaps] = xstrdup(src[i]);
+		(*ncaps)++;
+	}
+}
+
 int
 tty_term_read_list(const char *name, int fd, char ***caps, u_int *ncaps,
     char **cause)
 {
-	const struct tty_term_code_entry	*ent;
-	int					 error, n;
-	u_int					 i;
-	const char				*s;
-	char					 tmp[11];
+	(void)fd;
 
-	if (setupterm((char *)name, fd, &error) != OK) {
-		switch (error) {
-		case 1:
-			xasprintf(cause, "can't use hardcopy terminal: %s",
-			    name);
-			break;
-		case 0:
-			xasprintf(cause, "missing or unsuitable terminal: %s",
-			    name);
-			break;
-		case -1:
-			xasprintf(cause, "can't find terminfo database");
-			break;
-		default:
-			xasprintf(cause, "unknown error");
-			break;
-		}
-		return (-1);
+	if (strcmp(name, "tmux-256color") == 0) {
+		load_caps(tmux_256color_caps, caps, ncaps);
+		return (0);
 	}
-
-	*ncaps = 0;
-	*caps = NULL;
-
-	for (i = 0; i < tty_term_ncodes(); i++) {
-		ent = &tty_term_codes[i];
-		switch (ent->type) {
-		case TTYCODE_NONE:
-			continue;
-		case TTYCODE_STRING:
-			s = tigetstr((char *)ent->name);
-			if (s == NULL || s == (char *)-1)
-				continue;
-			break;
-		case TTYCODE_NUMBER:
-			n = tigetnum((char *)ent->name);
-			if (n == -1 || n == -2)
-				continue;
-			xsnprintf(tmp, sizeof tmp, "%d", n);
-			s = tmp;
-			break;
-		case TTYCODE_FLAG:
-			n = tigetflag((char *)ent->name);
-			if (n == -1)
-				continue;
-			if (n)
-				s = "1";
-			else
-				s = "0";
-			break;
-		default:
-			fatalx("unknown capability type");
-		}
-		*caps = xreallocarray(*caps, (*ncaps) + 1, sizeof **caps);
-		xasprintf(&(*caps)[*ncaps], "%s=%s", ent->name, s);
-		(*ncaps)++;
-	}
-
-#if !defined(NCURSES_VERSION_MAJOR) || NCURSES_VERSION_MAJOR > 5 || \
-    (NCURSES_VERSION_MAJOR == 5 && NCURSES_VERSION_MINOR > 6)
-	del_curterm(cur_term);
-#endif
-	return (0);
+	xasprintf(cause, "unsupported terminal: %s "
+	    "(only tmux-256color is supported without ncurses)", name);
+	return (-1);
 }
 
 void
@@ -789,98 +1076,44 @@ tty_term_string(struct tty_term *term, enum tty_code_code code)
 const char *
 tty_term_string_i(struct tty_term *term, enum tty_code_code code, int a)
 {
-	const char	*x = tty_term_string(term, code), *s;
+	const char	*x = tty_term_string(term, code);
 
-#if defined(HAVE_TIPARM_S)
-	s = tiparm_s(1, 0, x, a);
-#elif defined(HAVE_TIPARM)
-	s = tiparm(x, a);
-#else
-	s = tparm((char *)x, a, 0, 0, 0, 0, 0, 0, 0, 0);
-#endif
-	if (s == NULL) {
-		log_debug("could not expand %s", tty_term_codes[code].name);
-		return ("");
-	}
-	return (s);
+	return tmux_tparm(x, (long)a, 0, 0, 0, 0, 0, 0, 0, 0);
 }
 
 const char *
 tty_term_string_ii(struct tty_term *term, enum tty_code_code code, int a, int b)
 {
-	const char	*x = tty_term_string(term, code), *s;
+	const char	*x = tty_term_string(term, code);
 
-#if defined(HAVE_TIPARM_S)
-	s = tiparm_s(2, 0, x, a, b);
-#elif defined(HAVE_TIPARM)
-	s = tiparm(x, a, b);
-#else
-	s = tparm((char *)x, a, b, 0, 0, 0, 0, 0, 0, 0);
-#endif
-	if (s == NULL) {
-		log_debug("could not expand %s", tty_term_codes[code].name);
-		return ("");
-	}
-	return (s);
+	return tmux_tparm(x, (long)a, (long)b, 0, 0, 0, 0, 0, 0, 0);
 }
 
 const char *
 tty_term_string_iii(struct tty_term *term, enum tty_code_code code, int a,
     int b, int c)
 {
-	const char	*x = tty_term_string(term, code), *s;
+	const char	*x = tty_term_string(term, code);
 
-#if defined(HAVE_TIPARM_S)
-	s = tiparm_s(3, 0, x, a, b, c);
-#elif defined(HAVE_TIPARM)
-	s = tiparm(x, a, b, c);
-#else
-	s = tparm((char *)x, a, b, c, 0, 0, 0, 0, 0, 0);
-#endif
-	if (s == NULL) {
-		log_debug("could not expand %s", tty_term_codes[code].name);
-		return ("");
-	}
-	return (s);
+	return tmux_tparm(x, (long)a, (long)b, (long)c, 0, 0, 0, 0, 0, 0);
 }
 
 const char *
 tty_term_string_s(struct tty_term *term, enum tty_code_code code, const char *a)
 {
-	const char	*x = tty_term_string(term, code), *s;
+	const char	*x = tty_term_string(term, code);
 
-#if defined(HAVE_TIPARM_S)
-	s = tiparm_s(1, 1, x, a);
-#elif defined(HAVE_TIPARM)
-	s = tiparm(x, a);
-#else
-	s = tparm((char *)x, (long)a, 0, 0, 0, 0, 0, 0, 0, 0);
-#endif
-	if (s == NULL) {
-		log_debug("could not expand %s", tty_term_codes[code].name);
-		return ("");
-	}
-	return (s);
+	return tmux_tparm(x, (long)(intptr_t)a, 0, 0, 0, 0, 0, 0, 0, 0);
 }
 
 const char *
 tty_term_string_ss(struct tty_term *term, enum tty_code_code code,
     const char *a, const char *b)
 {
-	const char	*x = tty_term_string(term, code), *s;
+	const char	*x = tty_term_string(term, code);
 
-#if defined(HAVE_TIPARM_S)
-	s = tiparm_s(2, 3, x, a, b);
-#elif defined(HAVE_TIPARM)
-	s = tiparm(x, a, b);
-#else
-	s = tparm((char *)x, (long)a, (long)b, 0, 0, 0, 0, 0, 0, 0);
-#endif
-	if (s == NULL) {
-		log_debug("could not expand %s", tty_term_codes[code].name);
-		return ("");
-	}
-	return (s);
+	return tmux_tparm(x, (long)(intptr_t)a, (long)(intptr_t)b,
+	    0, 0, 0, 0, 0, 0, 0);
 }
 
 int
@@ -908,27 +1141,30 @@ tty_term_describe(struct tty_term *term, enum tty_code_code code)
 {
 	static char	 s[256];
 	char		 out[128];
+	const char	*name;
+
+	name = tty_term_codes[code].name;
+	if (name == NULL)
+		name = "";
 
 	switch (term->codes[code].type) {
 	case TTYCODE_NONE:
 		xsnprintf(s, sizeof s, "%4u: %s: [missing]",
-		    code, tty_term_codes[code].name);
+		    code, name);
 		break;
 	case TTYCODE_STRING:
 		strnvis(out, term->codes[code].value.string, sizeof out,
 		    VIS_OCTAL|VIS_CSTYLE|VIS_TAB|VIS_NL);
 		xsnprintf(s, sizeof s, "%4u: %s: (string) %s",
-		    code, tty_term_codes[code].name,
-		    out);
+		    code, name, out);
 		break;
 	case TTYCODE_NUMBER:
 		xsnprintf(s, sizeof s, "%4u: %s: (number) %d",
-		    code, tty_term_codes[code].name,
-		    term->codes[code].value.number);
+		    code, name, term->codes[code].value.number);
 		break;
 	case TTYCODE_FLAG:
 		xsnprintf(s, sizeof s, "%4u: %s: (flag) %s",
-		    code, tty_term_codes[code].name,
+		    code, name,
 		    term->codes[code].value.flag ? "true" : "false");
 		break;
 	}
