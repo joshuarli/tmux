@@ -21,6 +21,15 @@ The autotools files (`configure.ac`, `Makefile.am`, etc.) are still present for
 upstream compatibility but are not used by this workflow.
 
 
+## Optimized Copy-Mode Scrolling
+
+Copy-mode wheel scrolling should stay responsive under high input rates:
+coalesce wheel deltas on a short timer, bypass command-queue overhead for copy
+and view mode wheel events, and prefer line insert/delete redraws for pure
+scrolls. Preserve normal command semantics when scrolling also changes cursor
+state, selection, search marks, or exits copy mode.
+
+
 ## No ncurses
 
 tmux's only ncurses dependency was the terminfo query API: `setupterm`,
