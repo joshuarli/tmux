@@ -203,9 +203,12 @@ else
 		HAVE_STRLCAT=yes
 	fi
 
-	# forkpty: in -lutil on Linux.
+	# forkpty: in libc on musl, in -lutil on glibc.
 	HAVE_FORKPTY=no
 	if printf '#include <pty.h>\nint main(void){forkpty(0,0,0,0);return 0;}' \
+			| try_compile; then
+		HAVE_FORKPTY=yes
+	elif printf '#include <pty.h>\nint main(void){forkpty(0,0,0,0);return 0;}' \
 			| try_compile "-lutil"; then
 		HAVE_FORKPTY=yes
 		LIBS_EXTRA="$LIBS_EXTRA -lutil"
@@ -427,7 +430,7 @@ rule yacc
   description = YACC \$in
 
 rule install
-  command = mkdir -p \$destdir$PREFIX/bin && cp \$in \$destdir$PREFIX/bin/tmux && echo installed \$destdir$PREFIX/bin/tmux
+  command = mkdir -p "\$\$DESTDIR$PREFIX/bin" && cp \$in "\$\$DESTDIR$PREFIX/bin/tmux" && echo installed "\$\$DESTDIR$PREFIX/bin/tmux"
   description = INSTALL \$in
 
 # Parser generation.
